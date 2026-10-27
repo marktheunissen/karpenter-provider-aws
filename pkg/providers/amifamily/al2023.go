@@ -36,6 +36,14 @@ type AL2023 struct {
 	*Options
 }
 
+// FeatureFlags marks AL2023 as supporting flexible hugepages: the user data allocates them before nodeadm starts
+// kubelet.
+func (a AL2023) FeatureFlags() FeatureFlags {
+	flags := a.DefaultFamily.FeatureFlags()
+	flags.SupportsFlexibleHugePages = true
+	return flags
+}
+
 func (a AL2023) DescribeImageQuery(ctx context.Context, ssmProvider ssm.Provider, k8sVersion string, amiVersion string) (DescribeImageQuery, error) {
 	ids := map[string]Variant{}
 	for arch, variants := range map[string][]Variant{
@@ -91,6 +99,7 @@ func (a AL2023) UserData(kubeletConfig *v1.KubeletConfiguration, taints []corev1
 			CABundle:            caBundle,
 			CustomUserData:      customUserData,
 			InstanceStorePolicy: instanceStorePolicy,
+			HugePages:           a.HugePages,
 		},
 	}
 }

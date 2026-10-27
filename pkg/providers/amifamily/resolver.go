@@ -62,6 +62,9 @@ type Options struct {
 	InstanceStorePolicy *v1.InstanceStorePolicy
 	AMISelectorTerms    []v1.AMISelectorTerm `hash:"ignore"` // For Bottlerocket version resolution
 	AMIs                []v1.AMI             `hash:"ignore"` // Resolved AMIs for version extraction
+	// HugePages maps a hugepage size in kibibytes to the number of pages that Karpenter chose for the node. The
+	// hash ignores it here because it reaches the launch template hash through the user data.
+	HugePages map[int64]int64 `hash:"ignore"`
 	// Level-triggered fields that may change out of sync.
 	SecurityGroups            []v1.SecurityGroup
 	Tags                      map[string]string
@@ -119,6 +122,9 @@ type FeatureFlags struct {
 	PodsPerCoreEnabled           bool
 	EvictionSoftEnabled          bool
 	SupportsENILimitedPodDensity bool
+	// SupportsFlexibleHugePages is true for families that allocate the hugepages Karpenter chose for a node in the
+	// user data, before kubelet starts. A launch that needs hugepages fails for the other families.
+	SupportsFlexibleHugePages bool
 }
 
 // DefaultFamily provides default values for AMIFamilies that compose it
@@ -146,6 +152,10 @@ func NewDefaultResolver(region string) *DefaultResolver {
 //nolint:gocyclo
 func (r DefaultResolver) Resolve(nodeClass *v1.EC2NodeClass, nodeClaim *karpv1.NodeClaim, instanceTypes []*cloudprovider.InstanceType, capacityType string, tenancyType string, options *Options, placementGroupID string, placementGroupPartition int32) ([]*LaunchTemplate, error) {
 	amiFamily := GetAMIFamily(nodeClass.AMIFamily(), options)
+	// Fail the launch rather than start a node without its hugepages. Such a node would never initialize.
+	if len(options.HugePages) > 0 && !amiFamily.FeatureFlags().SupportsFlexibleHugePages {
+		return nil, fmt.Errorf("AMI family %q does not support flexible hugepages", nodeClass.AMIFamily())
+	}
 	if len(nodeClass.Status.AMIs) == 0 {
 		return nil, fmt.Errorf("no amis exist given constraints")
 	}

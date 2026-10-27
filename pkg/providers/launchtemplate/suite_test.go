@@ -46,11 +46,15 @@ import (
 	"k8s.io/client-go/tools/record"
 	clock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	karpv1alpha1 "sigs.k8s.io/karpenter/pkg/apis/v1alpha1"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
 	"sigs.k8s.io/karpenter/pkg/controllers/dynamicresources/deviceallocation"
+	"sigs.k8s.io/karpenter/pkg/controllers/nodeoverlay"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/events"
@@ -2393,6 +2397,141 @@ eviction-max-pod-grace-period = 10
 				Expect(err).To(BeNil())
 				ExpectLaunchTemplatesCreatedWithUserData(fmt.Sprintf(string(content), nodeClass.Name, karpv1.NodePoolLabelKey, nodePool.Name))
 			})
+		})
+	})
+	Context("Flexible Hugepages", func() {
+		hugepages2Mi := corev1.ResourceName("hugepages-2Mi")
+		var overlaidCloudProvider corecloudprovider.CloudProvider
+		var overlaidCluster *state.Cluster
+		var overlaidProvisioner *provisioning.Provisioner
+
+		BeforeEach(func() {
+			ctx = coreoptions.ToContext(ctx, coretest.Options(coretest.OptionsFields{
+				FeatureGates: coretest.FeatureGates{
+					NodeOverlay:      lo.ToPtr(true),
+					ReservedCapacity: lo.ToPtr(true),
+				},
+			}))
+			overlaidCloudProvider = overlay.Decorate(cloudProvider, env.Client, awsEnv.InstanceTypeStore)
+			overlaidCluster = state.NewCluster(awsEnv.Clock, env.Client, overlaidCloudProvider)
+			overlaidProvisioner = provisioning.NewProvisioner(
+				env.Client,
+				recorder,
+				overlaidCloudProvider,
+				overlaidCluster,
+				awsEnv.Clock,
+				deviceallocation.NewController(env.Client),
+			)
+		})
+		// applyMaxCapacityOverlay applies the NodePool, the NodeClass and a NodeOverlay that lets Karpenter choose up
+		// to 64Gi of 2Mi hugepages for each node, and loads the overlay into the instance type store.
+		applyMaxCapacityOverlay := func() {
+			GinkgoHelper()
+			nodeOverlay := coretest.NodeOverlay(karpv1alpha1.NodeOverlay{
+				Spec: karpv1alpha1.NodeOverlaySpec{
+					Requirements: []karpv1alpha1.NodeSelectorRequirement{{
+						Key:      karpv1.NodePoolLabelKey,
+						Operator: corev1.NodeSelectorOpIn,
+						Values:   []string{nodePool.Name},
+					}},
+					MaxCapacity: corev1.ResourceList{hugepages2Mi: resource.MustParse("64Gi")},
+				},
+			})
+			ExpectApplied(ctx, env.Client, nodeClass, nodePool, nodeOverlay)
+			nodeOverlayController := nodeoverlay.NewController(awsEnv.Clock, env.Client, cloudProvider, awsEnv.InstanceTypeStore, overlaidCluster)
+			ExpectReconciled(ctx, nodeOverlayController, reconcile.Request{})
+		}
+		// hugepagesPod returns a pod that requests 8602Mi of 2Mi hugepages, which is 4301 pages.
+		hugepagesPod := func() *corev1.Pod {
+			return coretest.UnschedulablePod(coretest.PodOptions{
+				ResourceRequirements: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("1"),
+						corev1.ResourceMemory: resource.MustParse("1Gi"),
+						hugepages2Mi:          resource.MustParse("8602Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceMemory: resource.MustParse("1Gi"),
+						hugepages2Mi:          resource.MustParse("8602Mi"),
+					},
+				},
+			})
+		}
+
+		It("should allocate the chosen hugepages before bootstrap.sh on AL2", func() {
+			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2@latest"}}
+			nodeClass.Spec.UserData = aws.String("#!/bin/bash\nsysctl -w vm.nr_hugepages=100\n")
+			applyMaxCapacityOverlay()
+			pod := hugepagesPod()
+			ExpectProvisioned(ctx, env.Client, overlaidCluster, overlaidCloudProvider, overlaidProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			ExpectLaunchTemplatesCreatedWithUserDataContaining("allocate_hugepages 2048 4301\n")
+			for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
+				// The script runs after the custom user data, so its count wins, and before kubelet starts.
+				custom := strings.Index(userData, "sysctl -w vm.nr_hugepages=100")
+				script := strings.Index(userData, "allocate_hugepages 2048 4301")
+				bootstrapScript := strings.Index(userData, "/etc/eks/bootstrap.sh")
+				Expect(custom).To(BeNumerically(">=", 0))
+				Expect(script).To(BeNumerically(">", custom))
+				Expect(bootstrapScript).To(BeNumerically(">", script))
+			}
+		})
+		It("should allocate the chosen hugepages in a shell script before the NodeConfig on AL2023", func() {
+			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2023@latest"}}
+			applyMaxCapacityOverlay()
+			pod := hugepagesPod()
+			ExpectProvisioned(ctx, env.Client, overlaidCluster, overlaidCloudProvider, overlaidProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			for _, userData := range ExpectUserDataExistsFromCreatedLaunchTemplates() {
+				archive, err := mime.NewArchive(userData)
+				Expect(err).ToNot(HaveOccurred())
+				_, script, found := lo.FindIndexOf(archive, func(entry mime.Entry) bool {
+					return entry.ContentType == mime.ContentTypeShellScript && strings.Contains(entry.Content, "allocate_hugepages 2048 4301\n")
+				})
+				Expect(found).To(BeTrue())
+				_, nodeConfig, _ := lo.FindIndexOf(archive, func(entry mime.Entry) bool {
+					return entry.ContentType == mime.ContentTypeNodeConfig
+				})
+				Expect(nodeConfig).To(BeNumerically(">", script))
+			}
+		})
+		It("should report the chosen hugepages in the NodeClaim status", func() {
+			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2023@latest"}}
+			applyMaxCapacityOverlay()
+			pod := hugepagesPod()
+			ExpectProvisioned(ctx, env.Client, overlaidCluster, overlaidCloudProvider, overlaidProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+
+			nodeClaims := &karpv1.NodeClaimList{}
+			Expect(env.Client.List(ctx, nodeClaims)).To(Succeed())
+			Expect(nodeClaims.Items).To(HaveLen(1))
+			status := nodeClaims.Items[0].Status
+			chosen := resource.MustParse("8602Mi")
+			Expect(status.Capacity.Name(hugepages2Mi, resource.BinarySI).Value()).To(Equal(chosen.Value()))
+			Expect(status.Allocatable.Name(hugepages2Mi, resource.BinarySI).Value()).To(Equal(chosen.Value()))
+			// Kubernetes takes hugepages out of allocatable memory, so the status must too.
+			maxMemory := status.Capacity.Memory().DeepCopy()
+			maxMemory.Sub(chosen)
+			Expect(status.Allocatable.Memory().Cmp(maxMemory)).To(BeNumerically("<=", 0))
+		})
+		It("should not add the hugepages script when the pod requests no hugepages", func() {
+			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "al2@latest"}}
+			applyMaxCapacityOverlay()
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, overlaidCluster, overlaidCloudProvider, overlaidProvisioner, pod)
+			ExpectScheduled(ctx, env.Client, pod)
+			ExpectLaunchTemplatesCreatedWithUserDataNotContaining("allocate_hugepages")
+		})
+		It("should fail the launch on Bottlerocket, which cannot allocate the hugepages", func() {
+			nodeClass.Spec.AMISelectorTerms = []v1.AMISelectorTerm{{Alias: "bottlerocket@latest"}}
+			applyMaxCapacityOverlay()
+			pod := hugepagesPod()
+			ExpectProvisioned(ctx, env.Client, overlaidCluster, overlaidCloudProvider, overlaidProvisioner, pod)
+			ExpectNotScheduled(ctx, env.Client, pod)
+			Expect(awsEnv.EC2API.CreateLaunchTemplateBehavior.CalledWithInput.Len()).To(BeZero())
+			Expect(awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Len()).To(BeZero())
 		})
 	})
 	Context("Detailed Monitoring", func() {
