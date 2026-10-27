@@ -41,6 +41,8 @@ type Options struct {
 	CustomUserData        *string
 	InstanceStorePolicy   *v1.InstanceStorePolicy
 	AMIVersion            string
+	// HugePages maps a hugepage size in kibibytes to the number of pages to allocate before kubelet starts.
+	HugePages map[int64]int64
 }
 
 func (o Options) kubeletExtraArgs() (args []string) {

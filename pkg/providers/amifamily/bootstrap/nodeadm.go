@@ -46,6 +46,14 @@ func (n Nodeadm) Script(_ context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parsing custom UserData, %w", err)
 	}
+	// The hugepages script runs after the custom user data, so its page counts win over any the user sets. Nodeadm
+	// starts kubelet only after cloud-init has run the shell scripts.
+	if script := n.hugePagesScript(); script != "" {
+		customEntries = append(customEntries, mime.Entry{
+			ContentType: mime.ContentTypeShellScript,
+			Content:     script,
+		})
+	}
 	mimeArchive := mime.Archive(append(customEntries, mime.Entry{
 		ContentType: mime.ContentTypeNodeConfig,
 		Content:     nodeConfigYAML,

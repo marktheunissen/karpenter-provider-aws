@@ -45,7 +45,9 @@ const (
 )
 
 func (e EKS) Script(_ context.Context) (string, error) {
-	userData, err := e.mergeCustomUserData(lo.Compact([]string{lo.FromPtr(e.CustomUserData), e.eksBootstrapScript()})...)
+	// The hugepages script runs after the custom user data, so its page counts win over any the user sets, and
+	// before the bootstrap script starts kubelet.
+	userData, err := e.mergeCustomUserData(lo.Compact([]string{lo.FromPtr(e.CustomUserData), e.hugePagesScript(), e.eksBootstrapScript()})...)
 	if err != nil {
 		return "", err
 	}

@@ -38,10 +38,12 @@ type AL2023 struct {
 
 // FeatureFlags marks AL2023 as supporting arbitrary kubelet config: nodeadm renders the raw kubelet
 // config map inline (see bootstrap.Nodeadm.generateInlineKubeletConfiguration), so any valid kubelet
-// field reaches the node rather than being dropped to the subset Karpenter maps explicitly.
+// field reaches the node rather than being dropped to the subset Karpenter maps explicitly. It also marks AL2023 as
+// supporting flexible hugepages: the user data allocates them before nodeadm starts kubelet.
 func (a AL2023) FeatureFlags() FeatureFlags {
 	flags := a.DefaultFamily.FeatureFlags()
 	flags.SupportsArbitraryKubeletConfig = true
+	flags.SupportsFlexibleHugePages = true
 	return flags
 }
 
@@ -101,6 +103,7 @@ func (a AL2023) UserData(kubeletConfig *v1.ParsedKubeletConfig, unparsedKubeletC
 			CABundle:              caBundle,
 			CustomUserData:        customUserData,
 			InstanceStorePolicy:   instanceStorePolicy,
+			HugePages:             a.HugePages,
 		},
 	}
 }

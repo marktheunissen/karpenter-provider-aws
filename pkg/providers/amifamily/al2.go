@@ -40,6 +40,14 @@ type AL2 struct {
 	*Options
 }
 
+// FeatureFlags marks AL2 as supporting flexible hugepages: the user data allocates them before bootstrap.sh starts
+// kubelet.
+func (a AL2) FeatureFlags() FeatureFlags {
+	flags := a.DefaultFamily.FeatureFlags()
+	flags.SupportsFlexibleHugePages = true
+	return flags
+}
+
 func (a AL2) DescribeImageQuery(ctx context.Context, ssmProvider ssm.Provider, k8sVersion string, amiVersion string) (DescribeImageQuery, error) {
 	ids := map[string][]Variant{}
 	for path, variants := range map[string][]Variant{
@@ -100,6 +108,7 @@ func (a AL2) UserData(kubeletConfig *v1.ParsedKubeletConfig, unparsedKubeletConf
 			CABundle:              caBundle,
 			CustomUserData:        customUserData,
 			InstanceStorePolicy:   instanceStorePolicy,
+			HugePages:             a.HugePages,
 		},
 	}
 }
