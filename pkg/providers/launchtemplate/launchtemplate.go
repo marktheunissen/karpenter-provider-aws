@@ -153,6 +153,9 @@ func (p *DefaultProvider) EnsureAll(
 	if err != nil {
 		return nil, err
 	}
+	if opts.HugePages, err = amifamily.HugePagesFromNodeClaim(nodeClaim); err != nil {
+		return nil, fmt.Errorf("resolving hugepages, %w", err)
+	}
 
 	var pgID string
 	var pgPartition int32
