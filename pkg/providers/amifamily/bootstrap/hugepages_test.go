@@ -30,6 +30,15 @@ var _ = Describe("HugePages", func() {
 		Expect(script).To(ContainSubstring(allocateHugePagesFunction))
 		Expect(script).To(HaveSuffix("allocate_hugepages 2048 4301\nallocate_hugepages 1048576 2\n"))
 	})
+	It("should write the 2Mi page count to sysctl.d, so it stays after a reboot", func() {
+		script := Options{HugePages: map[int64]int64{1048576: 2, 2048: 4301}}.hugePagesScript()
+		Expect(script).To(ContainSubstring("cat <<EOF >/etc/sysctl.d/zzzz-hugepages.conf\nvm.nr_hugepages = 4301\nEOF\n"))
+	})
+	It("should not write sysctl.d when there are no 2Mi pages", func() {
+		script := Options{HugePages: map[int64]int64{1048576: 2}}.hugePagesScript()
+		Expect(script).ToNot(ContainSubstring("sysctl.d"))
+		Expect(script).To(HaveSuffix("allocate_hugepages 1048576 2\n"))
+	})
 	It("should give the same script for the same hugepages", func() {
 		hugePages := map[int64]int64{2048: 1, 1048576: 1, 64: 1, 32768: 1}
 		first := Options{HugePages: hugePages}.hugePagesScript()

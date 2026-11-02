@@ -38,9 +38,22 @@ const allocateHugePagesFunction = `allocate_hugepages() {
 }
 `
 
+// hugePagesSysctlFile holds the 2Mi page count, so that it is set again on every boot. The user data runs only on
+// the first boot, but systemd-sysctl reads /etc/sysctl.d on every boot, before kubelet starts. The name sorts after
+// other files, so its value wins. It is the same file that custom user data may write, so Karpenter's value replaces
+// that one.
+const hugePagesSysctlFile = "/etc/sysctl.d/zzzz-hugepages.conf"
+
+// defaultHugePageSize is the default hugepage size in kibibytes on x86_64 and arm64 with 4 KiB base pages. The
+// vm.nr_hugepages sysctl sets the page count for this size only.
+const defaultHugePageSize = 2048
+
 // hugePagesScript returns a shell script that allocates the hugepages in o.HugePages. It returns an empty string
 // when there are no hugepages to allocate. The script must run before kubelet starts, because kubelet reads the
 // hugepages count only when it starts.
+//
+// The script writes the 2Mi page count to hugePagesSysctlFile, so that the count stays after a reboot. Other page
+// sizes have no sysctl, so their counts are lost when the node reboots.
 func (o Options) hugePagesScript() string {
 	if len(o.HugePages) == 0 {
 		return ""
@@ -48,6 +61,9 @@ func (o Options) hugePagesScript() string {
 	var script strings.Builder
 	script.WriteString("#!/bin/bash -e\n")
 	script.WriteString("# Allocate the hugepages that Karpenter chose for this node.\n")
+	if pages, ok := o.HugePages[defaultHugePageSize]; ok {
+		fmt.Fprintf(&script, "cat <<EOF >%s\nvm.nr_hugepages = %d\nEOF\n", hugePagesSysctlFile, pages)
+	}
 	script.WriteString(allocateHugePagesFunction)
 	// Sort the page sizes so that the same input always gives the same script, and so the same launch template.
 	sizes := lo.Keys(o.HugePages)
